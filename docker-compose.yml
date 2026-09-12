@@ -1,0 +1,6 @@
+services:
+  ingesta-ms2:
+    build: .
+    container_name: ingesta-ms2
+    env_file:
+      - .env
