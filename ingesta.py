@@ -48,51 +48,32 @@ def get_s3_client():
 def extraer_tabla(engine, tabla):
     with engine.connect() as conn:
         result = conn.execute(text(f"SELECT * FROM {tabla}"))
-        columns = result.keys()
-
-        return [
-            dict(zip(columns, row))
-            for row in result.fetchall()
-        ]
+        columns = list(result.keys())
+        rows = [dict(zip(columns, row)) for row in result.fetchall()]
+        return columns, rows
 
 
-def escribir_csv_local(tabla, rows):
+def escribir_csv_local(tabla, columns, rows):
     fecha = date.today().isoformat()
-
     outdir = OUTPUT_LOCAL / tabla / fecha
     outdir.mkdir(parents=True, exist_ok=True)
-
     ruta = outdir / f"{tabla}.csv"
 
     with ruta.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=rows[0].keys()
-        )
-
+        writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
 
     print(f"  {tabla}: {len(rows)} filas -> {ruta}")
-
     return ruta
 
 
-def subir_csv_s3(s3, bucket, tabla, rows):
-    if not rows:
-        print(f"  {tabla}: 0 filas, skip")
-        return
-
+def subir_csv_s3(s3, bucket, tabla, columns, rows):
     fecha = date.today().isoformat()
     key = f"raw/ms2/{tabla}/{fecha}/{tabla}.csv"
 
     buffer = io.StringIO()
-
-    writer = csv.DictWriter(
-        buffer,
-        fieldnames=rows[0].keys()
-    )
-
+    writer = csv.DictWriter(buffer, fieldnames=columns)
     writer.writeheader()
     writer.writerows(rows)
 
@@ -103,66 +84,36 @@ def subir_csv_s3(s3, bucket, tabla, rows):
         ContentType="text/csv",
     )
 
-    print(
-        f"  {tabla}: {len(rows)} filas -> "
-        f"s3://{bucket}/{key}"
-    )
+    print(f"  {tabla}: {len(rows)} filas -> s3://{bucket}/{key}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="ingesta-ms2: PostgreSQL -> CSV -> S3"
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="lee PostgreSQL y escribe CSVs en output/ sin tocar S3",
-    )
-
+    parser = argparse.ArgumentParser(description="ingesta-ms2: PostgreSQL -> CSV -> S3")
+    parser.add_argument("--dry-run", action="store_true", help="lee PostgreSQL y escribe CSVs en output/ sin tocar S3")
     args = parser.parse_args()
 
-    engine = create_engine(
-        get_db_url(),
-        pool_pre_ping=True
-    )
+    engine = create_engine(get_db_url(), pool_pre_ping=True)
 
     if args.dry_run:
         print("[ingesta-ms2] Modo: DRY-RUN (local, sin S3)")
-
         for tabla in TABLAS:
             print(f"Extrayendo {tabla}...")
-
-            rows = extraer_tabla(engine, tabla)
-
-            if rows:
-                escribir_csv_local(tabla, rows)
-
+            columns, rows = extraer_tabla(engine, tabla)
+            escribir_csv_local(tabla, columns, rows)
         print("[ingesta-ms2] Completado.")
         return
 
     bucket = os.getenv("AWS_S3_BUCKET")
-
     if not bucket:
-        raise RuntimeError(
-            "AWS_S3_BUCKET no configurado (DS-04 pendiente)"
-        )
+        raise RuntimeError("AWS_S3_BUCKET no configurado (DS-04 pendiente)")
 
     print(f"[ingesta-ms2] Bucket: {bucket}")
-
     s3 = get_s3_client()
 
     for tabla in TABLAS:
         print(f"Extrayendo {tabla}...")
-
-        rows = extraer_tabla(engine, tabla)
-
-        subir_csv_s3(
-            s3,
-            bucket,
-            tabla,
-            rows
-        )
+        columns, rows = extraer_tabla(engine, tabla)
+        subir_csv_s3(s3, bucket, tabla, columns, rows)
 
     print("[ingesta-ms2] Completado.")
 
