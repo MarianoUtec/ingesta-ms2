@@ -1,6 +1,5 @@
 import argparse
 import csv
-import io
 import os
 from datetime import date
 from pathlib import Path
@@ -20,7 +19,7 @@ TABLAS = [
     "opera_tripulacion",
 ]
 
-OUTPUT_LOCAL = Path("output") / "raw" / "ms2"
+OUTPUT_DIR = Path("output")  # carpeta plana, sin subdirectorios
 
 
 def get_db_url():
@@ -31,9 +30,6 @@ def get_db_url():
 
 
 def get_s3_client():
-    # os.getenv devuelve "" cuando la variable viene vacia.
-    # Se usa None para permitir que boto3 utilice la cadena
-    # de credenciales por defecto, por ejemplo Instance Profile.
     access_key = os.getenv("AWS_ACCESS_KEY_ID") or None
     secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
 
@@ -53,11 +49,9 @@ def extraer_tabla(engine, tabla):
         return columns, rows
 
 
-def escribir_csv_local(tabla, columns, rows):
-    fecha = date.today().isoformat()
-    outdir = OUTPUT_LOCAL / tabla / fecha
-    outdir.mkdir(parents=True, exist_ok=True)
-    ruta = outdir / f"{tabla}.csv"
+def escribir_csv(tabla, columns, rows):
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    ruta = OUTPUT_DIR / f"{tabla}.csv"
 
     with ruta.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
@@ -68,28 +62,18 @@ def escribir_csv_local(tabla, columns, rows):
     return ruta
 
 
-def subir_csv_s3(s3, bucket, tabla, columns, rows):
+def subir_a_s3(s3, bucket, ruta, tabla):
     fecha = date.today().isoformat()
     key = f"raw/ms2/{tabla}/{fecha}/{tabla}.csv"
 
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=columns)
-    writer.writeheader()
-    writer.writerows(rows)
+    s3.upload_file(str(ruta), bucket, key)
 
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=buffer.getvalue().encode("utf-8"),
-        ContentType="text/csv",
-    )
-
-    print(f"  {tabla}: {len(rows)} filas -> s3://{bucket}/{key}")
+    print(f"  {tabla}: subido -> s3://{bucket}/{key}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="ingesta-ms2: PostgreSQL -> CSV -> S3")
-    parser.add_argument("--dry-run", action="store_true", help="lee PostgreSQL y escribe CSVs en output/ sin tocar S3")
+    parser.add_argument("--dry-run", action="store_true", help="genera los CSV en output/ sin subir a S3")
     args = parser.parse_args()
 
     engine = create_engine(get_db_url(), pool_pre_ping=True)
@@ -99,7 +83,7 @@ def main():
         for tabla in TABLAS:
             print(f"Extrayendo {tabla}...")
             columns, rows = extraer_tabla(engine, tabla)
-            escribir_csv_local(tabla, columns, rows)
+            escribir_csv(tabla, columns, rows)
         print("[ingesta-ms2] Completado.")
         return
 
@@ -113,7 +97,8 @@ def main():
     for tabla in TABLAS:
         print(f"Extrayendo {tabla}...")
         columns, rows = extraer_tabla(engine, tabla)
-        subir_csv_s3(s3, bucket, tabla, columns, rows)
+        ruta = escribir_csv(tabla, columns, rows)
+        subir_a_s3(s3, bucket, ruta, tabla)
 
     print("[ingesta-ms2] Completado.")
 
